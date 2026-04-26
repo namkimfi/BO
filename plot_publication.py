@@ -1,11 +1,14 @@
-# schema version: v7.0
+# schema version: v7.2
 """Publication-quality figure generators for BO+GPR post-plot (Layer C).
 
 Follows lab-plot-style §1 (Full PlotStyle tier) and bo-gpr-post-plot §6.
 
 Axis label convention: V_ent / V_exit (physical gate names), never V_1 / V_2.
-Terminology: "Schoinas fit" = 2024 asymptote model (Appl. Phys. Lett.);
-             "Seo 2014 Eq.(1)" = 6-param sigmoid.
+Terminology (corrected 2026-04-26 — see memory/scientific_references.md):
+  * "Schoinas fit"        = Schoinas 2024 η-asymptote model (4-param).
+  * "Seo 2014 Eq.(1)"     = Kashcheyevs decay-cascade Gumbel-sum (4-param).
+  * "Sigmoid plateau fit" = phenomenological 6-param Fermi-product
+                            (formerly mislabeled "Seo 2014 Eq.(1)").
 """
 
 from __future__ import annotations
@@ -21,7 +24,8 @@ import numpy as np
 import pandas as pd
 
 from eta_refit import SchoinasFitResult, compute_eta
-from seo_fit import SeoFitResult
+from sigmoid_plateau_fit import SigmoidPlateauFitResult
+from decay_cascade_fit import DecayCascadeFitResult
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,12 +63,13 @@ class PlotStyle:
     # ─── Per-symbol marker sizes ─────────────────────────────────────────
     # Each data series has its OWN size knob. Override per panel via PANELS.
     # Legacy aliases (ms / ms_fit / ms_best) are kept for back-compat only.
-    # ms_bo            = 3   # BO-sampled η scatter   (fig_E1, fig_E2)
+    # ms_bo            = 3   # BO-sampled η scatter   (fig_E1, fig_E2, fig_E3)
     # ms_gpr_grid      = 3   # GPR grid η scatter     (fig_E1)
     # ms_fit_pts       = 5   # open-circle fit-point highlight (fig_E1)
     # ms_best          = 12  # generic "best point" star (fig_E1, fig_M1, fig_M2)
-    # ms_schoinas_star = 12  # Schoinas η_E^min star  (fig_E2)
-    # ms_seo_star      = 12  # Seo η_E^min star       (fig_E2)
+    # ms_schoinas_star = 12  # Schoinas η_E^min star  (fig_E2, fig_E3)
+    # ms_sigmoid_star  = 12  # sigmoid-plateau η_E^min star (fig_E2)
+    # ms_decay_star    = 12  # decay-cascade η_E^min star   (fig_E3)
     # ms_bo_iv         = 5   # BO sampling pts in I-vs-V_exit trace (fig_C)
     # ms_phase4        = 3   # phase4 stage markers   (fig_M2)
     # ms_bo_history    = 18  # scatter s= for BO history (fig_M2; uses scatter)
@@ -75,12 +80,13 @@ class PlotStyle:
      # ─── Per-symbol marker sizes ─────────────────────────────────────────
     # Each data series has its OWN size knob. Override per panel via PANELS.
     # Legacy aliases (ms / ms_fit / ms_best) are kept for back-compat only.
-    ms_bo            = 4   # BO-sampled η scatter   (fig_E1, fig_E2)
+    ms_bo            = 4   # BO-sampled η scatter   (fig_E1, fig_E2, fig_E3)
     ms_gpr_grid      = 4   # GPR grid η scatter     (fig_E1)
     ms_fit_pts       = 6   # open-circle fit-point highlight (fig_E1)
     ms_best          = 12  # generic "best point" star (fig_E1, fig_M1, fig_M2)
-    ms_schoinas_star = 12  # Schoinas η_E^min star  (fig_E2)
-    ms_seo_star      = 12  # Seo η_E^min star       (fig_E2)
+    ms_schoinas_star = 12  # Schoinas η_E^min star  (fig_E2, fig_E3)
+    ms_sigmoid_star  = 12  # sigmoid-plateau η_E^min star (fig_E2)
+    ms_decay_star    = 12  # decay-cascade η_E^min star   (fig_E3)
     ms_bo_iv         = 5   # BO sampling pts in I-vs-V_exit trace (fig_C)
     ms_phase4        = 3   # phase4 stage markers   (fig_M2)
     ms_bo_history    = 18  # scatter s= for BO history (fig_M2; uses scatter)
@@ -219,6 +225,17 @@ class PlotStyle:
             'legend_bbox_to_anchor': (0.02, 0.02),
             'legend_ncol': 1,
             # Audit: left-aligned at page bottom-left to avoid x-label overlap.
+            'audit_loc': 'figure',
+            'audit_x': 0.01, 'audit_y': 0.005,
+            'audit_ha': 'left', 'audit_va': 'bottom',
+            'audit_size_delta': -3,
+            'bottom_margin': 0.12,
+        },
+        'E3': {
+            'fig_w': 7.0, 'fig_h': 7.0,
+            'legend_loc': 'lower left',
+            'legend_bbox_to_anchor': (0.02, 0.02),
+            'legend_ncol': 1,
             'audit_loc': 'figure',
             'audit_x': 0.01, 'audit_y': 0.005,
             'audit_ha': 'left', 'audit_va': 'bottom',
@@ -509,16 +526,20 @@ def fig_E1_eta_extrapolation(V_bo: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# fig_E2 — Schoinas vs Seo 2014 Eq.(1) (post-plot §6.2)
+# fig_E2 — Schoinas vs phenomenological sigmoid-plateau (post-plot §6.2)
+#
+# NOTE: Prior to v7.2 this was named fig_E2_schoinas_vs_seo; the sigmoid
+# fit was incorrectly attributed to "Seo 2014 Eq.(1)". The actual Seo 2014
+# Eq.(1) is the decay-cascade Gumbel-sum (see fig_E3).
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fig_E2_schoinas_vs_seo(V_data: np.ndarray,
-                           n_data: np.ndarray,
-                           schoinas: SchoinasFitResult,
-                           seo: SeoFitResult,
-                           eta_noise: float,
-                           audit: str,
-                           st) -> plt.Figure:
+def fig_E2_schoinas_vs_sigmoid(V_data: np.ndarray,
+                               n_data: np.ndarray,
+                               schoinas: SchoinasFitResult,
+                               sigmoid: SigmoidPlateauFitResult,
+                               eta_noise: float,
+                               audit: str,
+                               st) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(st.fig_w, st.fig_h))
 
     eta_data = compute_eta(n_data)
@@ -537,17 +558,17 @@ def fig_E2_schoinas_vs_seo(V_data: np.ndarray,
                 ms=st.ms_schoinas_star, mec='black', mew=0.4,
                 label=r'Schoinas $\eta_E^{\min}$')
 
-    if seo.success:
-        ax.plot(seo.V_model, seo.eta_model,
+    if sigmoid.success:
+        ax.plot(sigmoid.V_model, sigmoid.eta_model,
                 '-', color='blue', lw=st.lw_model,
-                label=r'Seo 2014 Eq.(1) ($\eta_E^{\min}$='
-                      f'{seo.eta_E_min:+.2f}, RMS_n={seo.rms:.3f})')
-        ax.plot([seo.V_opt], [seo.eta_E_min],
+                label=r'Sigmoid plateau (6-param) ($\eta_E^{\min}$='
+                      f'{sigmoid.eta_E_min:+.2f}, RMS_n={sigmoid.rms:.3f})')
+        ax.plot([sigmoid.V_opt], [sigmoid.eta_E_min],
                 marker='*', ls='', color='darkblue',
-                ms=st.ms_seo_star, mec='black', mew=0.4,
-                label=r'Seo 2014 $\eta_E^{\min}$')
+                ms=st.ms_sigmoid_star, mec='black', mew=0.4,
+                label=r'Sigmoid plateau $\eta_E^{\min}$')
     else:
-        ax.text(0.02, 0.02, 'Seo fit: ' + seo.message,
+        ax.text(0.02, 0.02, 'Sigmoid fit: ' + sigmoid.message,
                 transform=ax.transAxes, fontsize=st.annot_size - 1,
                 color='blue', ha='left', va='bottom')
 
@@ -558,14 +579,83 @@ def fig_E2_schoinas_vs_seo(V_data: np.ndarray,
     ax.set_ylabel(LBL_ETA)
     y_lo = min(eta_noise - 0.3,
                (schoinas.eta_E_min - 0.3) if schoinas.success else eta_noise - 0.3,
-               (seo.eta_E_min - 0.3) if seo.success else eta_noise - 0.3)
+               (sigmoid.eta_E_min - 0.3) if sigmoid.success else eta_noise - 0.3)
     ax.set_ylim(y_lo, 0.2)
 
     if st.show_title:
-        ax.set_title('Schoinas vs Seo 2014 Eq.(1)',
+        ax.set_title('Schoinas vs sigmoid-plateau (6-param phenomenological)',
                      fontsize=st.title_size, pad=st.title_pad)
 
     _panel_label(ax, 'E2', st)
+    _place_legend(ax, st)
+    _place_audit(fig, ax, audit, st)
+    _apply_style(fig, [ax], st)
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fig_E3 — Schoinas vs Seo 2014 Eq.(1) decay-cascade
+#
+# The decay-cascade curve IS the actual Seo 2014 Eq.(1) (Kashcheyevs Gumbel-sum
+# form, 4-param `(a, b, Γ₁, Γ₂)`, FoM δ₂ = ln(Γ₂/Γ₁)).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fig_E3_schoinas_vs_decay_cascade(V_data: np.ndarray,
+                                     n_data: np.ndarray,
+                                     schoinas: SchoinasFitResult,
+                                     decay_cascade: Optional[DecayCascadeFitResult],
+                                     eta_noise: float,
+                                     audit: str,
+                                     st) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(st.fig_w, st.fig_h))
+
+    eta_data = compute_eta(n_data)
+
+    ax.plot(V_data, eta_data, 'o', color='#888888',
+            ms=st.ms_bo, mec='none',
+            label=r'BO-sampled $\eta$ data')
+
+    if schoinas.success:
+        ax.plot(schoinas.V_model, schoinas.eta_model,
+                '-', color='red', lw=st.lw_model,
+                label=rf'Schoinas ($\eta_E^{{\min}}={schoinas.eta_E_min:+.2f}$, '
+                      rf'RMS={schoinas.rms:.3f})')
+        ax.plot([schoinas.V_opt], [schoinas.eta_E_min],
+                marker='*', ls='', color='darkred',
+                ms=st.ms_schoinas_star, mec='black', mew=0.4)
+
+    if decay_cascade is not None and decay_cascade.success:
+        d2 = decay_cascade.delta2 if decay_cascade.delta2 is not None else float('nan')
+        ax.plot(decay_cascade.V_model, decay_cascade.eta_model,
+                '-', color='green', lw=st.lw_model,
+                label=r'Seo 2014 Eq.(1), decay-cascade '
+                      rf'($\eta_E^{{\min}}={decay_cascade.eta_E_min:+.2f}$, '
+                      rf'$\delta_2={d2:.2f}$, RMS_n={decay_cascade.rms:.3f})')
+        ax.plot([decay_cascade.V_opt], [decay_cascade.eta_E_min],
+                marker='*', ls='', color='darkgreen',
+                ms=st.ms_decay_star, mec='black', mew=0.4)
+    elif decay_cascade is not None:
+        ax.text(0.02, 0.06, 'Decay-cascade fit: ' + decay_cascade.message,
+                transform=ax.transAxes, fontsize=st.annot_size - 1,
+                color='green', ha='left', va='bottom')
+
+    ax.axhline(eta_noise, ls='--', color='gray', lw=st.lw_asym,
+               label=rf'$\eta_{{\mathrm{{noise}}}} = {eta_noise:+.2f}$')
+
+    ax.set_xlabel(LBL_VXIT)
+    ax.set_ylabel(LBL_ETA)
+    y_lo_candidates = [eta_noise - 0.3]
+    if schoinas.success:
+        y_lo_candidates.append(schoinas.eta_E_min - 0.3)
+    if decay_cascade is not None and decay_cascade.success:
+        y_lo_candidates.append(decay_cascade.eta_E_min - 0.3)
+    ax.set_ylim(min(y_lo_candidates), 0.2)
+
+    if st.show_title:
+        ax.set_title('Schoinas vs Seo 2014 Eq.(1) (decay-cascade)',
+                     fontsize=st.title_size, pad=st.title_pad)
+
+    _panel_label(ax, 'E3', st)
     _place_legend(ax, st)
     _place_audit(fig, ax, audit, st)
     _apply_style(fig, [ax], st)

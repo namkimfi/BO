@@ -1,15 +1,19 @@
-# schema version: v7.0
+# schema version: v7.2
 """CLI: python main.py <run_dir> [--eta-fit-upper -0.5] ...
 
 Per bo-gpr-post-plot SKILL.md §§5, 7, 8:
   * Reads a BO+GPR run folder (read-only).
-  * Produces <run_dir>_postplot/ with fig_E1/E2/M1/M2/T + fit_results.json
+  * Produces <run_dir>_postplot/ with fig_E1/E2/E3/M1/M2/T + fit_results.json
     + fit_curves.csv + postplot_config.json.
   * Original run folder is never modified.
 
-Terminology (memory/scientific_references.md):
-  * "Schoinas fit" = 2024 asymptote model (Appl. Phys. Lett. 125, 124001)
-  * "Seo 2014 Eq.(1)" = 6-param sigmoid — NOT Schoinas Eq.(1)
+Terminology (memory/scientific_references.md, corrected 2026-04-26):
+  * "Schoinas fit"        = Schoinas 2024 η-asymptote model (4-param).
+  * "Seo 2014 Eq.(1)"     = Kashcheyevs decay-cascade Gumbel-sum (4-param);
+                            implemented in `decay_cascade_fit.py`.
+  * "Sigmoid plateau fit" = phenomenological 6-param Fermi-product
+                            (formerly mislabeled "Seo 2014 Eq.(1)" before
+                            v7.2); implemented in `sigmoid_plateau_fit.py`.
 """
 
 from __future__ import annotations
@@ -30,16 +34,19 @@ from load_run import load_run, pumpmap_slice_at_V_ent, eta_map_row_at_V_ent
 from eta_refit import (
     compute_eta, find_eta_noise_2stage, schoinas_fit, schoinas_fit_2d,
 )
-from seo_fit import seo_fit
+from sigmoid_plateau_fit import sigmoid_plateau_fit
+from decay_cascade_fit import decay_cascade_fit
 from gpr_refit import fit_local_gpr_1d
 from plot_publication import (
     PlotStyle, _save, _audit_text,
     fig_C_iv_trace,
-    fig_E1_eta_extrapolation, fig_E2_schoinas_vs_seo,
+    fig_E1_eta_extrapolation,
+    fig_E2_schoinas_vs_sigmoid,
+    fig_E3_schoinas_vs_decay_cascade,
     fig_M1_eta_2d, fig_M2_bo_trajectory, fig_T_timing_table,
 )
 
-__version__ = '1.0'
+__version__ = '1.1'
 
 
 @dataclass
@@ -54,8 +61,9 @@ class PostPlotConfig:
     gpr_sigma_max: float = 0.05
     # V_ent slice tolerance for 1D cuts (§5)
     v_ent_slice_tol_V: float = 0.005
-    # Seo 2014 fit
-    seo_fit_enabled: bool = True
+    # Comparison fits on the BO-sampled 1D slice
+    sigmoid_plateau_enabled: bool = True   # phenomenological 6-param
+    decay_cascade_enabled: bool = True     # Seo 2014 Eq.(1), 4-param
     # Output
     dpi: int = 300
     save_pdf: bool = True
@@ -79,7 +87,11 @@ def _parse_args():
     p.add_argument('--v-ent-tol-mV', type=float, default=None,
                    help='V_ent slice tolerance in mV (default: 5.0)')
     p.add_argument('--no-pdf', action='store_true')
-    p.add_argument('--no-seo', action='store_true')
+    p.add_argument('--no-sigmoid', action='store_true',
+                   help='Disable phenomenological sigmoid-plateau fit '
+                        '(formerly --no-seo)')
+    p.add_argument('--no-decay-cascade', action='store_true',
+                   help='Disable real Seo 2014 Eq.(1) decay-cascade fit')
     return p.parse_args()
 
 
@@ -94,8 +106,10 @@ def _apply_overrides(cfg: PostPlotConfig, args) -> PostPlotConfig:
         cfg.v_ent_slice_tol_V = args.v_ent_tol_mV / 1000.0
     if args.no_pdf:
         cfg.save_pdf = False
-    if args.no_seo:
-        cfg.seo_fit_enabled = False
+    if args.no_sigmoid:
+        cfg.sigmoid_plateau_enabled = False
+    if args.no_decay_cascade:
+        cfg.decay_cascade_enabled = False
     return cfg
 
 
@@ -205,9 +219,13 @@ def run(args):
     else:
         print(f'  Schoinas 2D: FAILED — {schoinas_2d.message}')
 
-    seo_res = None
-    if cfg.seo_fit_enabled:
-        seo_res = seo_fit(V_bo, n_bo, V_best=best_Vexit)
+    sigmoid_res = None
+    if cfg.sigmoid_plateau_enabled:
+        sigmoid_res = sigmoid_plateau_fit(V_bo, n_bo, V_best=best_Vexit)
+
+    decay_res = None
+    if cfg.decay_cascade_enabled:
+        decay_res = decay_cascade_fit(V_bo, n_bo)
 
     # ── Print fit summary ──────────────────────────────────────────────────
     for name, r in [('Schoinas (GPR grid)', schoinas_grid),
@@ -218,13 +236,24 @@ def run(args):
                   + (f'  [{r.message}]' if r.message else ''))
         else:
             print(f'  {name}: FAILED — {r.message}')
-    if seo_res is not None:
-        if seo_res.success:
-            print(f'  Seo 2014 Eq.(1): N={seo_res.n_fit_pts}, RMS_n='
-                  f'{seo_res.rms:.3f}, η_E^min={seo_res.eta_E_min:+.3f} '
-                  f'@ V_opt={seo_res.V_opt*1000:.1f} mV')
+    if sigmoid_res is not None:
+        if sigmoid_res.success:
+            print(f'  Sigmoid plateau (6-param phenomenological): '
+                  f'N={sigmoid_res.n_fit_pts}, RMS_n={sigmoid_res.rms:.3f}, '
+                  f'η_E^min={sigmoid_res.eta_E_min:+.3f} '
+                  f'@ V_opt={sigmoid_res.V_opt*1000:.1f} mV')
         else:
-            print(f'  Seo 2014 Eq.(1): FAILED — {seo_res.message}')
+            print(f'  Sigmoid plateau: FAILED — {sigmoid_res.message}')
+    if decay_res is not None:
+        if decay_res.success:
+            print(f'  Decay-cascade (Seo 2014 Eq.(1)): '
+                  f'N={decay_res.n_fit_pts}, RMS_n={decay_res.rms:.3f}, '
+                  f'η_E^min={decay_res.eta_E_min:+.3f} '
+                  f'@ V_opt={decay_res.V_opt*1000:.1f} mV, '
+                  f'δ₂=ln(Γ₂/Γ₁)={decay_res.delta2:.2f}'
+                  + (f'  [{decay_res.message}]' if decay_res.message else ''))
+        else:
+            print(f'  Decay-cascade: FAILED — {decay_res.message}')
 
     # ── Plot style ─────────────────────────────────────────────────────────
     st = PlotStyle()
@@ -257,14 +286,26 @@ def run(args):
     import matplotlib.pyplot as plt
     plt.close(fig)
 
-    if seo_res is not None:
+    if sigmoid_res is not None:
         st_E2 = PlotStyle.for_panel('E2')
         st_E2.dpi = st.dpi; st_E2.out_fmt = st.out_fmt
-        fig = fig_E2_schoinas_vs_seo(
+        fig = fig_E2_schoinas_vs_sigmoid(
             V_data=V_bo, n_data=n_bo,
-            schoinas=schoinas_bo, seo=seo_res,
+            schoinas=schoinas_bo, sigmoid=sigmoid_res,
             eta_noise=eta_noise, audit=audit, st=st_E2)
-        _save(fig, 'fig_E2_schoinas_vs_seo', st_E2, str(out_dir))
+        _save(fig, 'fig_E2_schoinas_vs_sigmoid', st_E2, str(out_dir))
+        plt.close(fig)
+
+    # fig_E3: Schoinas vs Seo 2014 Eq.(1) decay-cascade.
+    if decay_res is not None:
+        st_E3 = PlotStyle.for_panel('E3')
+        st_E3.dpi = st.dpi; st_E3.out_fmt = st.out_fmt
+        fig = fig_E3_schoinas_vs_decay_cascade(
+            V_data=V_bo, n_data=n_bo,
+            schoinas=schoinas_bo,
+            decay_cascade=decay_res,
+            eta_noise=eta_noise, audit=audit, st=st_E3)
+        _save(fig, 'fig_E3_schoinas_vs_decay_cascade', st_E3, str(out_dir))
         plt.close(fig)
 
     # fig_C — I vs V_exit trace at best_V_ent (notebook panel (C) reproduction)
@@ -386,7 +427,12 @@ def run(args):
             'V_exit_at_min': schoinas_2d.V_exit_at_min,
             'message': schoinas_2d.message or '',
         } if schoinas_2d is not None else None),
-        'seo_2014_eq1': _fit_dict(seo_res) if seo_res is not None else None,
+        'sigmoid_plateau': (_fit_dict(sigmoid_res)
+                            if sigmoid_res is not None else None),
+        'decay_cascade_seo2014_eq1': ({
+            **_fit_dict(decay_res),
+            'delta2': decay_res.delta2,
+        } if decay_res is not None else None),
         # cross-check vs notebook
         'notebook_eta_noise': (data.get('eta_summary') or {}).get('eta_noise'),
         'notebook_eta_E_min': (data.get('eta_summary') or {}).get('eta_E_min'),
@@ -407,10 +453,14 @@ def run(args):
         # Put BO-sampled Schoinas curve on a separate V axis if it differs
         curve_cols['V_bo_fit'] = schoinas_bo.V_model
         curve_cols['eta_schoinas_bo'] = schoinas_bo.eta_model
-    if seo_res is not None and seo_res.success:
-        curve_cols['V_seo'] = seo_res.V_model
-        curve_cols['n_seo'] = seo_res.n_model
-        curve_cols['eta_seo'] = seo_res.eta_model
+    if sigmoid_res is not None and sigmoid_res.success:
+        curve_cols['V_sigmoid'] = sigmoid_res.V_model
+        curve_cols['n_sigmoid'] = sigmoid_res.n_model
+        curve_cols['eta_sigmoid'] = sigmoid_res.eta_model
+    if decay_res is not None and decay_res.success:
+        curve_cols['V_decay_cascade'] = decay_res.V_model
+        curve_cols['n_decay_cascade'] = decay_res.n_model
+        curve_cols['eta_decay_cascade'] = decay_res.eta_model
     if curve_cols:
         # pad to common length for DataFrame
         L = max(len(v) for v in curve_cols.values())
